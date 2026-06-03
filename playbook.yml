@@ -1,0 +1,242 @@
+---
+# ============================================================================
+# playbook.yml — Instalación automatizada de WordPress con Ansible
+# Proyecto: FinTech Solutions S.A. / TechOps Solutions
+# Asignatura: Herramientas de Automatización de Despliegues (mudevops04_lab)
+# ============================================================================
+# Este playbook automatiza la instalación completa de un servidor WordPress
+# incluyendo Apache, PHP 8.1, MySQL y WP-CLI sobre Ubuntu 22.04.
+# Al finalizar, el servidor muestra directamente el primer blog de WordPress.
+
+- name: Instalar y configurar WordPress con LAMP
+  hosts: all
+  become: yes
+  vars:
+    wp_db_name: "wordpress"
+    wp_db_user: "wp_user"
+    wp_db_password: "Wp_2026_Secure!"
+    wp_site_url: "http://192.168.56.20"
+    wp_site_title: "FinTech Solutions Blog"
+    wp_admin_user: "admin"
+    wp_admin_password: "Admin_2026_Secure!"
+    wp_admin_email: "admin@fintech.com"
+
+  tasks:
+    # ──── 1. Actualizar sistema ────
+    - name: Actualizar caché de paquetes
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    # ──── 2. Instalar Apache ────
+    - name: Instalar Apache
+      apt:
+        name: apache2
+        state: present
+
+    - name: Iniciar y habilitar Apache
+      service:
+        name: apache2
+        state: started
+        enabled: yes
+
+    # ──── 3. Instalar PHP y extensiones necesarias para WordPress ────
+    - name: Instalar PHP y extensiones
+      apt:
+        name:
+          - php
+          - php-mysql
+          - php-gd
+          - php-curl
+          - php-mbstring
+          - php-xml
+          - php-zip
+          - php-intl
+          - libapache2-mod-php
+        state: present
+
+    - name: Reiniciar Apache para cargar PHP
+      service:
+        name: apache2
+        state: restarted
+
+    # ──── 4. Instalar MySQL ────
+    - name: Instalar MySQL Server
+      apt:
+        name: mysql-server
+        state: present
+
+    - name: Iniciar y habilitar MySQL
+      service:
+        name: mysql
+        state: started
+        enabled: yes
+
+    # ──── 5. Crear base de datos y usuario para WordPress ────
+    - name: Crear base de datos WordPress
+      mysql_db:
+        name: "{{ wp_db_name }}"
+        state: present
+
+    - name: Crear usuario WordPress
+      mysql_user:
+        name: "{{ wp_db_user }}"
+        password: "{{ wp_db_password }}"
+        priv: "{{ wp_db_name }}.*:ALL"
+        host: localhost
+        state: present
+
+    # ──── 6. Instalar WP-CLI ────
+    - name: Descargar WP-CLI
+      get_url:
+        url: https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+        dest: /usr/local/bin/wp
+        mode: '0755'
+
+    # ──── 7. Descargar y configurar WordPress ────
+    - name: Descargar WordPress
+      command: wp core download --path=/var/www/html --allow-root
+      args:
+        creates: /var/www/html/wp-config-sample.php
+
+    - name: Crear wp-config.php
+      command: >
+        wp config create
+        --dbname={{ wp_db_name }}
+        --dbuser={{ wp_db_user }}
+        --dbpass={{ wp_db_password }}
+        --dbhost=localhost
+        --path=/var/www/html
+        --allow-root
+      args:
+        creates: /var/www/html/wp-config.php
+
+    # ──── 8. Instalar WordPress ────
+    - name: Instalar WordPress
+      command: >
+        wp core install
+        --url={{ wp_site_url }}
+        --title="{{ wp_site_title }}"
+        --admin_user={{ wp_admin_user }}
+        --admin_password={{ wp_admin_password }}
+        --admin_email={{ wp_admin_email }}
+        --path=/var/www/html
+        --allow-root
+      args:
+        creates: /var/www/html/wp-content/plugins/akismet
+
+    # ──── 9. Permisos de archivos ────
+    - name: Establecer permisos del directorio WordPress
+      file:
+        path: /var/www/html
+        owner: www-data
+        group: www-data
+        recurse: yes
+        state: directory
+
+    # ──── 10. Extensión opcional: Nginx como proxy inverso ────
+    - name: Instalar Nginx
+      apt:
+        name: nginx
+        state: present
+
+    - name: Configurar Nginx como reverse proxy para WordPress
+      copy:
+        content: |
+          server {
+              listen 443 ssl default_server;
+              ssl_certificate /etc/ssl/certs/selfsigned.crt;
+              ssl_certificate_key /etc/ssl/private/selfsigned.key;
+
+              server_name _;
+
+              location / {
+                  proxy_pass http://127.0.0.1:80;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              }
+
+              # Bloquear rutas de administración (extensión opcional)
+              location /wp-admin {
+                  deny all;
+                  return 403;
+              }
+
+              location /wp-login.php {
+                  deny all;
+                  return 403;
+              }
+          }
+        dest: /etc/nginx/sites-available/wordpress-proxy
+        mode: '0644'
+
+    - name: Generar certificado SSL autofirmado
+      command: >
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048
+        -keyout /etc/ssl/private/selfsigned.key
+        -out /etc/ssl/certs/selfsigned.crt
+        -subj "/CN=localhost"
+      args:
+        creates: /etc/ssl/certs/selfsigned.crt
+
+    - name: Activar sitio Nginx
+      file:
+        src: /etc/nginx/sites-available/wordpress-proxy
+        dest: /etc/nginx/sites-enabled/wordpress-proxy
+        state: link
+
+    - name: Desactivar sitio por defecto de Nginx
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Cambiar puerto de Apache a 8080 para no conflictuar con Nginx
+      lineinfile:
+        path: /etc/apache2/ports.conf
+        regexp: '^Listen 80'
+        line: 'Listen 8080'
+
+    - name: Cambiar VirtualHost de Apache a 8080
+      replace:
+        path: /etc/apache2/sites-available/000-default.conf
+        regexp: 'VirtualHost \*:80'
+        replace: 'VirtualHost *:8080'
+
+    - name: Reiniciar Apache y Nginx
+      service:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - apache2
+        - nginx
+
+    # ──── 11. Instalar tema y contenido inicial ────
+    - name: Instalar tema Astra (gratuito y popular)
+      command: >
+        wp theme install astra --activate --path=/var/www/html --allow-root
+      args:
+        creates: /var/www/html/wp-content/themes/astra
+
+    - name: Crear primer post del blog
+      command: >
+        wp post create
+        --post_title="Bienvenidos a FinTech Solutions"
+        --post_content="<p>Este es el primer blog de FinTech Solutions S.A., desplegado mediante Ansible como parte de la transformacion DevOps de la organizacion. La automatizacion de despliegues permite a la empresa centrarse en lo que realmente importa: sus clientes.</p>"
+        --post_status=publish
+        --path=/var/www/html
+        --allow-root
+      args:
+        creates: /var/www/html/wp-content/uploads
+
+    # ──── 12. Verificación final ────
+    - name: Verificar que WordPress responde (vía Nginx)
+      uri:
+        url: https://localhost
+        validate_certs: no
+        return_content: yes
+      register: wp_response
+
+    - name: Mostrar confirmación
+      debug:
+        msg: "WordPress instalado exitosamente en {{ wp_site_url }} (HTTP) y https://localhost:8443 (HTTPS vía Nginx proxy)"
