@@ -15,7 +15,7 @@
     wp_db_name: "wordpress"
     wp_db_user: "wp_user"
     wp_db_password: "Wp_2026_Secure!"
-    wp_site_url: "http://192.168.56.20"
+    wp_site_url: "http://192.168.56.20:8080"
     wp_site_title: "FinTech Solutions Blog"
     wp_admin_user: "admin"
     wp_admin_password: "Admin_2026_Secure!"
@@ -72,11 +72,44 @@
         state: started
         enabled: yes
 
-    # ──── 5. Crear base de datos y usuario para WordPress ────
+    # ──── 5. Instalar PyMySQL (requisito para módulos MySQL de Ansible) ────
+    - name: Instalar PyMySQL (driver Python para MySQL)
+      apt:
+        name: python3-pymysql
+        state: present
+
+    - name: Instalar pip3 para dependencias Python
+      apt:
+        name: python3-pip
+        state: present
+
+    # ──── 6. Configurar autenticación MySQL (Ubuntu usa auth_socket) ────
+    - name: Cambiar root a autenticación por contraseña
+      command: >
+        mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'Root_2026_Secure!'; FLUSH PRIVILEGES;"
+      args:
+        creates: /root/.mysql_root_configured
+
+    - name: Marcar root como configurado
+      file:
+        path: /root/.mysql_root_configured
+        state: touch
+
+    - name: Crear archivo .my.cnf para root
+      copy:
+        content: |
+          [client]
+          user=root
+          password=Root_2026_Secure!
+        dest: /root/.my.cnf
+        mode: '0600'
+
+    # ──── 7. Crear base de datos y usuario para WordPress ────
     - name: Crear base de datos WordPress
       mysql_db:
         name: "{{ wp_db_name }}"
         state: present
+        login_unix_socket: /var/run/mysqld/mysqld.sock
 
     - name: Crear usuario WordPress
       mysql_user:
@@ -85,6 +118,7 @@
         priv: "{{ wp_db_name }}.*:ALL"
         host: localhost
         state: present
+        login_unix_socket: /var/run/mysqld/mysqld.sock
 
     # ──── 6. Instalar WP-CLI ────
     - name: Descargar WP-CLI
@@ -122,10 +156,19 @@
         --admin_email={{ wp_admin_email }}
         --path=/var/www/html
         --allow-root
-      args:
-        creates: /var/www/html/wp-content/plugins/akismet
+      register: wp_install
+      failed_when:
+        - wp_install.rc != 0
+        - '"already installed" not in wp_install.stderr'
+      changed_when: wp_install.rc == 0
 
-    # ──── 9. Permisos de archivos ────
+    # ──── 9. Eliminar index.html de Apache (para que WordPress tome el control) ────
+    - name: Eliminar página por defecto de Apache
+      file:
+        path: /var/www/html/index.html
+        state: absent
+
+    # ──── 10. Permisos de archivos ────
     - name: Establecer permisos del directorio WordPress
       file:
         path: /var/www/html
@@ -151,7 +194,7 @@
               server_name _;
 
               location / {
-                  proxy_pass http://127.0.0.1:80;
+                  proxy_pass http://127.0.0.1:8080;
                   proxy_set_header Host $host;
                   proxy_set_header X-Real-IP $remote_addr;
                   proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -200,8 +243,8 @@
     - name: Cambiar VirtualHost de Apache a 8080
       replace:
         path: /etc/apache2/sites-available/000-default.conf
-        regexp: 'VirtualHost \*:80'
-        replace: 'VirtualHost *:8080'
+        regexp: '<VirtualHost \*:80>'
+        replace: '<VirtualHost *:8080>'
 
     - name: Reiniciar Apache y Nginx
       service:
